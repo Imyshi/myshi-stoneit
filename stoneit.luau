@@ -2678,48 +2678,80 @@ local function TryPlaceAtGrinder(state)
         return false, "prompt Giling Batu tidak ditemukan"
     end
 
-    -- Auto Place juga butuh mendekat ke prompt. Ghost mode selalu
-    -- dipindahkan sementara ke bawah penggiling karena titik ghost berada
-    -- ratusan stud di bawah home, jadi prompt Giling Batu ditolak server.
-    local usePlaceTp = autoPlaceTeleport or ghostActive
-    if usePlaceTp then
-        local root = GetCharacterRoot()
-        if not root then
-            return false, "karakter belum siap"
-        end
+    StealUtil.ApplyPromptRange(prompt)
 
-        -- Sama seperti Auto Steal: posisi tetap di dalam radius prompt 8 stud.
-        -- Kedalaman besar membuat server menolak Giling Batu, lalu Auto Place
-        -- terlihat tidak pernah memasukkan batu ke penggiling.
+    local function StoneStillCarried()
+        if FindHeldStone and FindHeldStone() then
+            return true
+        end
+        return heldBefore ~= nil
+            and MyshiUtil.IsStillCarried(heldBefore, GetCharacterRoot())
+    end
+
+    local function FireGrinder(count, delay)
+        local firedAny = false
+        for _ = 1, count do
+            -- Selalu tembak minimal sekali: deteksi batu di tangan bisa
+            -- terlambat satu tick setelah Tool di-equip.
+            if FirePromptOnce(prompt) then
+                firedAny = true
+            end
+            if not StoneStillCarried() then
+                break
+            end
+            task.wait(delay or 0.12)
+        end
+        return firedAny
+    end
+
+    local function GrinderApproachCFrame()
+        local promptPosition = StealUtil.PromptWorldPosition(nil, prompt)
+            or (grinder.Position + Vector3.new(0, grinder.Size.Y / 2 + 1.5, 0))
+        -- Posisi tetap di dalam radius prompt 8 stud supaya Giling Batu
+        -- diterima server, bukan terkubur terlalu dalam.
         local maxDistance = math.max(6.5, PROMPT_MAX_DISTANCE - 0.2)
         local burial = math.clamp(
             tonumber(autoStealTpDepth) or AUTO_STEAL_TP_DEPTH_DEFAULT,
             3,
             6
         )
-        local promptPosition = StealUtil.PromptWorldPosition(nil, prompt)
-            or (grinder.Position + Vector3.new(0, grinder.Size.Y / 2 + 1.5, 0))
         local floorY = MyshiUtil.GetGroundY(promptPosition, grinder)
         local placeY = promptPosition.Y - maxDistance
         if floorY and floorY < promptPosition.Y then
             placeY = math.max(placeY, floorY - burial)
         end
         placeY = math.min(placeY, promptPosition.Y - 1.5)
-        local placeCFrame = CFrame.new(Vector3.new(
-            promptPosition.X,
-            placeY,
-            promptPosition.Z
-        ))
+        return CFrame.new(Vector3.new(promptPosition.X, placeY, promptPosition.Z))
+    end
 
-        if ghostActive then
-            -- Ghost tidak boleh memakai StealthHold; root-nya di-anchor jauh
-            -- di bawah map. GhostMoveTo menyimpan posisi ghost dan
-            -- mengembalikannya setelah percobaan place selesai.
-            if not GhostMoveTo(placeCFrame) then
-                return false, "gagal memindahkan ghost ke penggiling"
+    local fired = false
+
+    if ghostActive then
+        -- Ghost TIDAK memindahkan karakter untuk place. Prompt Giling Batu di
+        -- game ini tidak punya validasi jarak ketat, sama seperti prompt batu,
+        -- jadi tembak langsung dari titik ghost. Ini yang membuat Auto Steal
+        -- dan Auto Place bisa bergantian tanpa jeda panjang.
+        fired = FireGrinder(2, 0.12)
+
+        -- Cadangan saja: kalau server menolak tembakan jarak jauh, ghost
+        -- dipindahkan sebentar ke bawah penggiling lalu langsung dikembalikan.
+        -- Kasus normal tidak pernah masuk ke jalur ini.
+        if fired and StoneStillCarried() then
+            if GhostMoveTo(GrinderApproachCFrame()) then
+                task.wait(0.06)
+                FireGrinder(2, 0.12)
+                -- Beri satu tick supaya server sempat memeriksa posisi.
+                task.wait(0.2)
+                pcall(GhostRestore)
             end
-            task.wait(0.25)
-        else
+        end
+    else
+        if autoPlaceTeleport then
+            local root = GetCharacterRoot()
+            if not root then
+                return false, "karakter belum siap"
+            end
+
             -- Kalau karakter masih ditahan di bawah batu sambil membawa batu,
             -- lepas anchor dulu supaya CFrame ke penggiling ikut ke server.
             if StealthHold.active and StealthHold.held then
@@ -2731,56 +2763,34 @@ local function TryPlaceAtGrinder(state)
                 return false, "anti-void tidak bisa aktif"
             end
 
-            -- TP dulu saat unanchored, baru ditahan.
+            local placeCFrame = GrinderApproachCFrame()
             root.CFrame = placeCFrame
             root.AssemblyLinearVelocity = Vector3.zero
             root.AssemblyAngularVelocity = Vector3.zero
             StealthHold.Hold(placeCFrame)
-            task.wait(0.25)
+            task.wait(0.2)
         end
+
+        fired = FireGrinder(2, 0.12)
     end
 
-    StealUtil.ApplyPromptRange(prompt)
-
-    -- Tembak berulang selama batu masih di tangan. Server kadang menolak
-    -- tembakan pertama (streaming penggiling / Tool baru di-equip), dan
-    -- ghost mode butuh kepastian sebelum root dikembalikan ke bawah home.
-    local fired = false
-    for attempt = 1, (ghostActive and 3 or 2) do
-        if attempt > 1 and not (FindHeldStone and FindHeldStone()) then
-            break
-        end
-        if FirePromptOnce(prompt) then
-            fired = true
-        end
-        task.wait(attempt == 1 and 1.4 or 0.9)
-    end
     if not fired then
         return false, "prompt Giling Batu gagal ditembak"
     end
 
-    -- Sukses HANYA kalau batu benar-benar lepas dari karakter/Backpack DAN
-    -- ada batu di penggiling. Diperiksa beberapa kali supaya batu yang masih
-    -- melayang di atas kepala tidak dianggap sudah masuk penggiling.
-    local rootAfter = GetCharacterRoot()
-    local heldAfter = FindHeldStone and FindHeldStone()
-    local occupied = IsGrinderOccupied(grinder, true)
-    local placed = heldBefore ~= nil and occupied and heldAfter == nil
-        and not MyshiUtil.IsStillCarried(heldBefore, rootAfter)
-
-    if placed then
-        for _ = 1, 6 do
-            task.wait(0.25)
-            rootAfter = GetCharacterRoot()
-            heldAfter = FindHeldStone and FindHeldStone() or nil
-            if heldAfter or MyshiUtil.IsStillCarried(heldBefore, rootAfter) then
-                placed = false
-                break
-            end
-            if not IsGrinderOccupied(grinder, true) then
-                placed = false
-                break
-            end
+    -- Sukses kalau batu benar-benar lepas dari karakter/Backpack. Status
+    -- penggiling hanya bukti tambahan: penggiling yang langsung menggiling
+    -- membuat "ada batu di atasnya" jadi false padahal place berhasil. Karena
+    -- itu verifikasi tidak lagi menunggu 1,5+ detik dan tidak menahan fitur
+    -- lain selama itu.
+    local placed = false
+    for attempt = 1, 4 do
+        if heldBefore and not StoneStillCarried() then
+            placed = true
+            break
+        end
+        if attempt < 4 then
+            task.wait(0.2)
         end
     end
 
@@ -2788,6 +2798,7 @@ local function TryPlaceAtGrinder(state)
         return true, "prompt " .. tostring(prompt.ActionText or "Giling Batu")
     end
 
+    local heldAfter = FindHeldStone and FindHeldStone() or nil
     if heldAfter then
         return false, "batu masih di tangan, belum masuk penggiling"
     end
