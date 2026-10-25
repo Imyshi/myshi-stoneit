@@ -2172,6 +2172,68 @@ local function UpdateGhostStatus()
     end
 end
 
+-- Ghost mode tidak bisa memakai StealthHold (memang sengaja tidak boleh
+-- unanchor saat ghost). Untuk Auto Place, pindahkan root sementara ke bawah
+-- penggiling, lalu kembalikan ke titik ghost setelah percobaan selesai.
+ghostActionReturnCFrame = nil
+
+function GhostMoveTo(cframe)
+    if not ghostActive or not ghostRoot or not ghostRoot.Parent
+        or not cframe or not ghostCharacter
+        or LocalPlayer.Character ~= ghostCharacter
+    then
+        return false
+    end
+
+    if not ghostActionReturnCFrame then
+        ghostActionReturnCFrame = ghostRoot.CFrame
+    end
+
+    pcall(function()
+        ghostRoot.Anchored = false
+        ghostRoot.CFrame = cframe
+        ghostRoot.AssemblyLinearVelocity = Vector3.zero
+        ghostRoot.AssemblyAngularVelocity = Vector3.zero
+    end)
+    task.wait(0.12)
+
+    if ghostRoot and ghostRoot.Parent then
+        pcall(function()
+            ghostRoot.Anchored = true
+        end)
+    end
+
+    return true
+end
+
+function GhostRestore()
+    if not ghostActive then
+        ghostActionReturnCFrame = nil
+        return
+    end
+    if not ghostActionReturnCFrame or not ghostRoot or not ghostRoot.Parent then
+        ghostActionReturnCFrame = nil
+        return
+    end
+
+    local back = ghostActionReturnCFrame
+    ghostActionReturnCFrame = nil
+
+    pcall(function()
+        ghostRoot.Anchored = false
+        ghostRoot.CFrame = back
+        ghostRoot.AssemblyLinearVelocity = Vector3.zero
+        ghostRoot.AssemblyAngularVelocity = Vector3.zero
+    end)
+    task.wait(0.12)
+
+    if ghostRoot and ghostRoot.Parent then
+        pcall(function()
+            ghostRoot.Anchored = true
+        end)
+    end
+end
+
 LocalPlayer.CharacterAdded:Connect(function()
     local wasWanted = ghostWanted or ghostActive
     if ghostActive then
@@ -2616,22 +2678,14 @@ local function TryPlaceAtGrinder(state)
         return false, "prompt Giling Batu tidak ditemukan"
     end
 
-    local usePlaceTp = autoPlaceTeleport and not ghostActive
+    -- Auto Place juga butuh mendekat ke prompt. Kalau ghost mode aktif,
+    -- pindahkan root sementara ke bawah penggiling; jangan biarkan tetap
+    -- 500 stud di bawah map karena server menolak Giling Batu dari sana.
+    local usePlaceTp = autoPlaceTeleport
     if usePlaceTp then
         local root = GetCharacterRoot()
         if not root then
             return false, "karakter belum siap"
-        end
-
-        -- Kalau karakter masih ditahan di bawah batu sambil membawa batu,
-        -- lepas anchor dulu supaya CFrame ke penggiling ikut ke server.
-        if StealthHold.active and StealthHold.held then
-            StealthHold.Release()
-            task.wait(0.05)
-        end
-
-        if not StealthHold.Begin() then
-            return false, "anti-void tidak bisa aktif"
         end
 
         -- Sama seperti Auto Steal: posisi tetap di dalam radius prompt 8 stud.
@@ -2657,12 +2711,33 @@ local function TryPlaceAtGrinder(state)
             promptPosition.Z
         ))
 
-        -- Sama seperti Auto Steal: TP dulu saat unanchored, baru ditahan.
-        root.CFrame = placeCFrame
-        root.AssemblyLinearVelocity = Vector3.zero
-        root.AssemblyAngularVelocity = Vector3.zero
-        StealthHold.Hold(placeCFrame)
-        task.wait(0.25)
+        if ghostActive then
+            -- Ghost tidak boleh memakai StealthHold; root-nya di-anchor jauh
+            -- di bawah map. GhostMoveTo menyimpan posisi ghost dan
+            -- mengembalikannya setelah percobaan place selesai.
+            if not GhostMoveTo(placeCFrame) then
+                return false, "gagal memindahkan ghost ke penggiling"
+            end
+            task.wait(0.25)
+        else
+            -- Kalau karakter masih ditahan di bawah batu sambil membawa batu,
+            -- lepas anchor dulu supaya CFrame ke penggiling ikut ke server.
+            if StealthHold.active and StealthHold.held then
+                StealthHold.Release()
+                task.wait(0.05)
+            end
+
+            if not StealthHold.Begin() then
+                return false, "anti-void tidak bisa aktif"
+            end
+
+            -- TP dulu saat unanchored, baru ditahan.
+            root.CFrame = placeCFrame
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+            StealthHold.Hold(placeCFrame)
+            task.wait(0.25)
+        end
     end
 
     StealUtil.ApplyPromptRange(prompt)
@@ -2727,6 +2802,10 @@ local function StartPlaceAttempt(state, manual)
 
     task.spawn(function()
         local callOk, resultA, resultB = pcall(TryPlaceAtGrinder, state)
+
+        -- Kalau tadi GhostMoveTo memindahkan root ke penggiling, kembalikan
+        -- ke titik ghost setelah percobaan selesai (berhasil maupun gagal).
+        pcall(GhostRestore)
 
         local ok = false
         local message = "unknown error"
