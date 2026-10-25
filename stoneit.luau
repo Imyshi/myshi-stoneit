@@ -2678,10 +2678,10 @@ local function TryPlaceAtGrinder(state)
         return false, "prompt Giling Batu tidak ditemukan"
     end
 
-    -- Auto Place juga butuh mendekat ke prompt. Kalau ghost mode aktif,
-    -- pindahkan root sementara ke bawah penggiling; jangan biarkan tetap
-    -- 500 stud di bawah map karena server menolak Giling Batu dari sana.
-    local usePlaceTp = autoPlaceTeleport
+    -- Auto Place juga butuh mendekat ke prompt. Ghost mode selalu
+    -- dipindahkan sementara ke bawah penggiling karena titik ghost berada
+    -- ratusan stud di bawah home, jadi prompt Giling Batu ditolak server.
+    local usePlaceTp = autoPlaceTeleport or ghostActive
     if usePlaceTp then
         local root = GetCharacterRoot()
         if not root then
@@ -2741,11 +2741,23 @@ local function TryPlaceAtGrinder(state)
     end
 
     StealUtil.ApplyPromptRange(prompt)
-    local fired = FirePromptOnce(prompt)
+
+    -- Tembak berulang selama batu masih di tangan. Server kadang menolak
+    -- tembakan pertama (streaming penggiling / Tool baru di-equip), dan
+    -- ghost mode butuh kepastian sebelum root dikembalikan ke bawah home.
+    local fired = false
+    for attempt = 1, (ghostActive and 3 or 2) do
+        if attempt > 1 and not (FindHeldStone and FindHeldStone()) then
+            break
+        end
+        if FirePromptOnce(prompt) then
+            fired = true
+        end
+        task.wait(attempt == 1 and 1.4 or 0.9)
+    end
     if not fired then
         return false, "prompt Giling Batu gagal ditembak"
     end
-    task.wait(1.4)
 
     -- Sukses HANYA kalau batu benar-benar lepas dari karakter/Backpack DAN
     -- ada batu di penggiling. Diperiksa beberapa kali supaya batu yang masih
